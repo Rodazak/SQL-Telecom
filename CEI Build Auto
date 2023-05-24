@@ -1,0 +1,428 @@
+CREATE OR REPLACE PROCEDURE reports.sp_calc_cei_week(_dt_week character DEFAULT NULL::character(6))
+ LANGUAGE plpgsql
+AS $procedure$
+begin
+	IF _dt_week IS NULL THEN
+		_dt_week := to_char( CURRENT_DATE - interval '1 day' , 'iyyyiw');
+	END IF;
+	
+	RAISE NOTICE '% | RUNSQL sp_calc_cei_week Week: % ',timeofday()::timestamp, _dt_week ;
+	
+	RAISE NOTICE '% | Clean Up Partition Table' , timeofday();
+	execute format($f$ DROP TABLE IF EXISTS reports.cei_week_%s $f$ , _dt_week );
+	
+	RAISE NOTICE '% | Create Partition Public Table' , timeofday();
+	execute format($f$ CREATE TABLE reports.cei_week_%s 
+				   		PARTITION OF reports.cei_week
+				   		FOR VALUES IN ('%s') $f$
+				   , _dt_week , _dt_week );
+	
+	RAISE NOTICE '% | INSERT Week: %',timeofday()::timestamp, _dt_week;
+	execute format($f$ insert into reports.cei_week_%s
+	select
+		 full_cliente.dt_week
+		,full_cliente.mac
+		,full_cliente.marca
+		,full_cliente.modelo
+		,full_cliente.cmts_name
+		,full_cliente.nodo
+		,coalesce(full_cliente.docsis,'0.0') as docsis
+		,full_cliente.velocidad_ds
+		,full_cliente.velocidad_us
+		,full_cliente.deco_full_ip
+		-- Tengo que cubrirme del cei negativo.
+		,case when (100 - (
+				  full_cliente.observado_saludred/100::float * peso.salud_red * saludred_scored
+				+ full_cliente.observado_ocupacion/100::float * peso.ocupacion_cablemac * ocupacion_scored
+				+ full_cliente.observado_preq/100::float * peso.espectro * preq_scored
+				+ full_cliente.observado_latencia/100::float * peso.latencia * latencia_scored
+				+ full_cliente.observado_fullb/100::float * peso.full_band	* fullb_scored
+				+ full_cliente.observado_estabilidad/100::float * peso.estabilidad * estabilidad_scored
+				+ full_cliente.observado_wifi/100::float * peso.wifi * wifi_scored
+				+ full_cliente.observado_danos/100::float * peso.danos_open
+				+ full_cliente.observado_partial/100::float * peso.partial_service				
+			)::float
+		 ) < 0 then 0 else (100 - (
+				  full_cliente.observado_saludred/100::float * peso.salud_red * saludred_scored
+				+ full_cliente.observado_ocupacion/100::float * peso.ocupacion_cablemac * ocupacion_scored
+				+ full_cliente.observado_preq/100::float * peso.espectro * preq_scored
+				+ full_cliente.observado_latencia/100::float * peso.latencia * latencia_scored
+				+ full_cliente.observado_fullb/100::float * peso.full_band	* fullb_scored
+				+ full_cliente.observado_estabilidad/100::float * peso.estabilidad * estabilidad_scored
+				+ full_cliente.observado_wifi/100::float * peso.wifi * wifi_scored
+				+ full_cliente.observado_danos/100::float * peso.danos_open
+				+ full_cliente.observado_partial/100::float * peso.partial_service				
+			)::float
+		 )::numeric(6,2) end as cei
+		,full_cliente.perfil
+		,coalesce(full_cliente.consumo_ds,'UnkMid') as consumo
+		
+		,full_cliente.observado_saludred  * saludred_scored as observado_saludred
+		,full_cliente.observado_wifi
+		,full_cliente.observado_ocupacion
+		
+		,full_cliente.observado_ocupacion_downlink
+		,full_cliente.observado_ocupacion_uplink
+		
+		,full_cliente.observado_preq * preq_scored as observado_preq
+		,full_cliente.observado_latencia
+		,full_cliente.observado_danos
+		,full_cliente.observado_partial
+		,full_cliente.observado_partial_ds
+		,full_cliente.observado_partial_us
+		,full_cliente.observado_fullb
+		,full_cliente.observado_estabilidad
+		
+		,full_cliente.saludred_scored
+		,full_cliente.wifi_scored
+		,full_cliente.ocupacion_scored
+		
+		,full_cliente.preq_scored
+		,full_cliente.latencia_scored
+		,full_cliente.dano_open_scored
+		,full_cliente.partial_scored
+		,full_cliente.fullb_scored
+		,full_cliente.estabilidad_scored
+		
+		,full_cliente.hub
+		,full_cliente.sector_operativo
+		,coalesce(full_cliente.consumo_us,'UnkMid') as consumo_us
+		,full_cliente.saludred_snr_noctuno_dias
+	from(
+		SELECT
+			 ful.dt_week
+			,inv.mac
+			,inv.hub
+			,inv.cmts_name
+			,inv.nodo
+			,inv.sector_operativo
+			,inv.marca
+			,inv.modelo
+			,inv.velocidad_ds
+			,inv.velocidad_us
+			,inv.deco_full_ip
+			
+			,cast(
+				case when dns.category is null then 'websurfing' else dns.category end as character varying(15)
+			) as perfil
+			
+			,case when coalesce(tr.traffic_sum_bytes_down,0) < consumo.max_bytes_down_low then 'Low' else
+				case when tr.traffic_sum_bytes_down < consumo.max_bytes_down_mid then 'Mid' else
+					case when tr.traffic_sum_bytes_down < consumo.max_bytes_down_hig then 'High' else 
+					'Extreme' end 
+				end 
+			 end as consumo_ds
+		
+			,case when coalesce(tr.traffic_sum_bytes_up,0) < consumo.max_bytes_up_low then 'Low' else
+				case when tr.traffic_sum_bytes_up < consumo.max_bytes_up_mid then 'Mid' else
+					case when tr.traffic_sum_bytes_up < consumo.max_bytes_up_hig then 'High' else 
+					'Extreme' end 
+				end 
+			 end as consumo_us
+			
+			,inv.docsis
+		
+			--######################################################################
+			--# > Salud de Red 3
+			--######################################################################
+			,case WHEN ful.saludred_muestras >= 2 and ful.saludred_observado_dias >= 2 then 100
+				  WHEN ful.saludred_muestras >= 2 and ful.saludred_observado_dias = 1 then 50
+				  ELSE 0 end as observado_saludred
+		
+			/*	
+			,case WHEN ful.saludred_muestras > 4 and ful.saludred_observado_dias > 4 then 100
+				when saludred_muestras > 0
+				then round((ful.saludred_observado_dias/nullif(ful.saludred_muestras,0)::float*100)::int,0) 
+				else 0 end as observado_saludred
+			*/
+		
+			--######################################################################
+			--# > No tiene ninguna Recomandacion.
+			--######################################################################
+			,0 as observado_wifi
+
+			--######################################################################
+			--# > No tiene Saturacion de DS y/o US 2 dias o mas
+			--######################################################################
+			--,case when cb.cablemac_ds_max_utilization_exceed >= 2 or cb.cablemac_us_max_utilization_exceed >= 2
+				--then 100 else 0 end as observado_ocupacion
+				
+			,case when cb.nodo is not null then 100 else 0 end as observado_ocupacion
+				
+			--######################################################################
+			--# > No tiene Saturacion de DS y/o US 2 dias o mas
+			--######################################################################
+			--,case when cb.cablemac_ds_max_utilization_exceed >= 2
+				--then 100 else 0 end as observado_ocupacion_downlink
+				
+			,case when cb.nodo is not null and acceso in ('DS','TRANSPORTE')
+				then 100 else 0 end as observado_ocupacion_downlink
+				
+			--######################################################################
+			--# > No tiene Saturacion de DS y/o US 2 dias o mas
+			--######################################################################
+			--,case when cb.cablemac_us_max_utilization_exceed >= 2
+				--then 100 else 0 end as observado_ocupacion_uplink
+
+			,case when cb.nodo is not null and acceso in ('US','TRANSPORTE')
+				then 100 else 0 end as observado_ocupacion_uplink
+				
+			--######################################################################
+			--# > Severidad por 2 dias o mas
+			--# > Deberia tener siempre aunque sea un par de muestras!
+			--######################################################################
+			,case when ful.preq_severity >= 2 or preq_muestras < 1
+				then 100 else 0 end as observado_preq
+
+			--######################################################################
+			--# > Ratio MinPing < 0.5 AvgPing < 0.5 MaxPing < 0.5 vs Hub Ping
+			--######################################################################
+			,case when latencia.latencia_muestras > 4 then
+				coalesce(
+					-- No cumple el minimo
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float <= 0.3
+					then 50 else null end,
+					-- No cumple el avg
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float <= 0.3
+					then 25 else null end,
+					-- No cumple el maximo NO DEBERIA PASAR NUNCA SIN EL AVG
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float > 0.3
+					then 75 else null end,
+					-- No cumple el min y avg
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float <= 0.3
+					then 75 else null end,
+					-- No cumple el min y max NO DEBERIA PASAR NUNCA SIN EL AVG
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float > 0.3
+					then 100 else null end,
+					-- No cumple el avg y max
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float <= 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float > 0.3
+					then 75 else null end,
+					-- No cumple ninguno
+					case when latencia.latencia_exceed_min / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg / nullif(latencia.latencia_muestras,0)::float > 0.3
+						  and latencia.latencia_exceed_avg_limitmax / nullif(latencia.latencia_muestras,0)::float > 0.3
+					then 100 else null end
+				,0)
+			 else 0 end as observado_latencia
+
+			--######################################################################
+			--# > No tiene daños
+			--######################################################################
+			,coalesce( 
+				--SCORE 0
+				case when dano.open_cant_danos = 0 
+					  and dano.dm_cant_danos_masivos = 0
+					  and dano.recurrente_llamado = 0 
+					  and dano.recurrente_masivo = 0 
+					  and dano.cant_masivo_y_llamo = 0 
+				then 0 else null end, 
+				--SCORE 100
+				case when dano.open_cant_danos >= 3 
+					   	or (dano.open_cant_dias_con_danos > 2 and dano.open_cant_danos_afecta_cm >= 2) 
+					    or dano.dm_cant_danos_masivos >= 3 
+					    or dano.dm_cant_danos_afectado_total >= 2 
+					    or dano.dm_minutos_afectado > 350 
+					    or (dano.recurrente_llamado >= 1 and dano.recurrente_masivo >= 1) 
+						or dano.cant_semanas_recurrente_danos_masivos > 1 
+						or dano.cant_semanas_recurrente_danos_open > 1
+						or dano.cant_masivo_y_llamo >= 1 
+				then 100 else null end, 
+				--SCORE 75
+				case when ((dano.open_cant_danos >= 1 and dano.dm_cant_danos_masivos >= 1) 
+						or (dano.open_cant_danos >= 2  and dano.open_cant_danos_afecta_cm >=1) 
+						or dano.dm_cant_dias_con_dano_masivo > 1 
+						or dano.dm_cant_danos_afectado_total > 1 
+						or (dano.dm_cant_danos_masivos >= 1 and dano.dm_minutos_afectado > 200)  
+						or dano.recurrente_llamado >= 2 
+						or dano.recurrente_masivo > 2 ) 
+					   and dano.cant_masivo_y_llamo = 0  
+				then 75 else null end,
+				--SCORE 50
+				case when (dano.open_cant_danos >= 1 
+						or dano.dm_cant_danos_masivos >= 2 
+						or dano.dm_minutos_afectado > 150 
+						or dano.recurrente_masivo >= 2 
+						or dano.recurrente_llamado >= 1)
+					   and dano.cant_masivo_y_llamo = 0  
+				then 50 else null end,
+				--SCORE 25
+				case when open_cant_danos = 0 
+					   and ((dano.dm_cant_danos_masivos >= 1 and  dano.dm_minutos_afectado <=  150 ) 
+					    or dano.recurrente_masivo>= 1)
+					   and dano.cant_masivo_y_llamo = 0 
+				then 25 else null end 
+			,0) as observado_danos
+		
+			--######################################################################
+			--# > No tiene Partial Service por mas de 2 dias
+			--# > No tiene Canales afectados mas de 1
+			--######################################################################
+			,case when (ful.partial_num_affect_max >= 1 and ful.partial_dias >= 2) 
+				or (ful.partial_us_num_affect_max >= 1 and ful.partial_us_dias >= 2)
+				then 100 else 0 end as observado_partial
+			
+			,case when ful.partial_num_affect_max >= 1 and ful.partial_dias >= 2
+				then 100 else 0 end as observado_partial_ds
+			
+			,case when ful.partial_us_num_affect_max >= 1 and ful.partial_us_dias >= 2
+				then 100 else 0 end as observado_partial_us
+
+			--######################################################################
+			--# > No tiene Efectos de Full Band en ningun dia.
+			--# > aca los que no tienen datos se los toma como OK.
+			--######################################################################
+			,case when inv.modelo not in ('CGA4233TCH3','FAST3890V3') then 
+				case when 
+					ful.fullb_ingresslte_alto > 0 or
+					ful.fullb_ingresslte_medio > 0 or
+					ful.fullb_ingresslte_bajo > 0 or
+					ful.fullb_ingress3g > 0 or
+					ful.fullb_ingressfm > 0 or
+					ful.fullb_adjacency > 0 or
+					ful.fullb_ripples > 0 or
+					ful.fullb_tilt > 0 or
+					ful.fullb_suckout > 0 or
+					ful.fullb_fallavod > 0 or
+					ful.fullb_freq_750 > 0 or
+					ful.fullb_freq_850 > 0
+				then 100 else 0 end 
+			else 0 end as observado_fullb 
+
+			--######################################################################
+			--# > Estabilidad 2 
+			--######################################################################
+			--MInimo 2 dias de Resets
+			,case when ful.estabilidad_muestras >= 2 and ful.estabilidad_observado_dias >= 2 then 100
+				  when ful.estabilidad_muestras >= 2 and ful.estabilidad_observado_dias = 1 then 50
+				  else 0 end as observado_estabilidad 
+			/*
+			,case when ful.estabilidad_muestras > 4 and ful.estabilidad_observado_dias > 4 then 100
+			when  ful.estabilidad_muestras > 0
+			then round((ful.estabilidad_observado_dias/nullif( ful.estabilidad_muestras,0)::float*100)::int,0) 
+			else 0 end as observado_estabilidad 
+			*/
+			
+			,case when saludred_muestras > 0 and saludred_muestras is not null then 1 else 0 end as saludred_scored
+			,0 as wifi_scored
+			,case when preq_muestras > 0 and preq_muestras is not null then 1 else 0 end as preq_scored
+			--,case when cablemac_muestras > 0 and cablemac_muestras is not null then 1 else 0 end as ocupacion_scored
+			,1 as ocupacion_scored
+			,case when latencia_muestras > 0 and latencia_muestras is not null then 1 else 0 end as latencia_scored
+			,case when open_cant_danos > 0 and open_cant_danos is not null or dm_cant_danos_masivos is not null then 1 else 0 end as dano_open_scored
+			,case when estabilidad_muestras > 0 and  estabilidad_muestras is not null then 1 else 0 end as estabilidad_scored
+			,case when (partial_muestras > 0 and partial_muestras is not null) or (partial_us_muestras > 0 and partial_us_muestras is not null) then 1 else 0 end as partial_scored
+			,case when fullb_muestras > 0 and fullb_muestras is not null 
+				and inv.modelo not in ('CGA4233TCH3','FAST3890V3') then 1 else 0 end as fullb_scored
+			,saludred_snr_noctuno_dias
+		
+		from (select * from public.inventario_mac_week
+			  where dt_week = '%s' 
+			  	and tipo_producto in ('INTERNET CABLEMODEM','INTERNET CORPORATIVA' )
+			    --and mac = '2C79D779F700'
+			 ) as inv
+		
+		--#####################################
+		-- Datos Semanales Full Week
+		--#####################################
+		left join (select * from reports.full_week
+					where dt_week = '%s'
+			) ful
+			on ful.mac = inv.mac
+
+		--#####################################
+		-- Datos Semanales De Trafico de Usuario de DL 
+		--#####################################
+		left join (select * from reports.full_week_traffic 
+				   where dt_week = '%s'
+		) as tr
+			on tr.mac = inv.mac
+		
+		--#####################################
+		-- Datos Semanales de CableMac
+		--#####################################
+		/*left join (select * from reports.full_week_cablemac 
+					where dt_week = 
+		)as cb
+			on inv.cmts_name = cb.cmts_name and inv.cmts_cablemac = cb.cablemac
+		*/
+		left join (select 
+					nodo,UPPER(max(acceso)) as acceso
+					from public.reporte_ocupacion
+					where dt_week =  '%s'
+					group by nodo
+		) as cb 
+			on inv.nodo = cb.nodo
+			
+		--#####################################
+        -- Datos Semanales De DAÑOS OPEN, MASIVOS y Recurencia
+        --#####################################
+        left join (select * from reports.full_week_danos
+                   where dt_week = '%s'
+        ) as dano
+			on dano.mac = inv.mac
+		
+		--#####################################
+		-- Muestra de Latencia
+		--#####################################
+		left join (select * from reports.full_week_latencia 
+				   	where dt_week = '%s'
+				  ) as latencia
+			on latencia.mac = inv.mac
+		
+		--#####################################
+		-- Limite de Velocidad
+		-- Config de Limites segun IQR
+		--#####################################
+		--left join public.inventario_dsus_traffic_limit heavycheck
+		--	on heavycheck.velocidad_ds = inv.velocidad_ds
+
+		left join reports.traffic_usage_model_2022 consumo
+			on  inv.deco_full_ip = consumo.deco_full_ip
+			and inv.velocidad_ds = consumo.velocidad_ds
+			and inv.velocidad_us = consumo.velocidad_us
+		
+		--#####################################
+		-- Categoria de DNS
+		--#####################################
+		left join reports.vw_dns_mac_model dns
+			on dns.mac = inv.mac
+
+	) as full_cliente
+
+	--#####################################
+	-- Calibraciond de CEI
+	--#####################################
+	join reports.pesos_cei_v4 peso
+		--fuerzo algunas cosas a la media
+		on  coalesce(full_Cliente.perfil,'websurfing') = peso.perfil
+		--fuerzo algunas cosas a la media
+		and 
+			(case when full_cliente.consumo_ds = 'Extreme' or full_cliente.consumo_us = 'Extreme' then 'Extreme'
+				else case when full_cliente.consumo_ds = 'High' or full_cliente.consumo_us = 'High' then 'High'
+					else case when full_cliente.consumo_ds = 'Mid' or full_cliente.consumo_us = 'Mid' then 'Mid'
+						else case when full_cliente.consumo_ds = 'Low' or full_cliente.consumo_us = 'Low' then 'Low'
+						else 'Mid' end 
+			 		end 
+				end 
+			end) = peso.consumo
+		--fuerzo algunas cosas a la media
+		and coalesce(full_cliente.docsis,'3.0') = peso.docsis  $f$
+	, _dt_week , _dt_week , _dt_week , _dt_week , _dt_week , _dt_week , _dt_week , _dt_week , _dt_week );
+	
+	RAISE NOTICE '% | All Done Week: %',timeofday()::timestamp, _dt_week;
+
+END
+$procedure$
+;
