@@ -1,0 +1,187 @@
+--Grafana Clientes con filtros
+
+select 
+invw.mac
+,invw.nodo
+,invw.sector_operativo
+,invw.nombre_cliente
+,invw.apellido_cliente
+,invw.direccion_completa
+,ceiw.cei
+,(SELECT cast(AVG(value) as decimal (10,0)) AS average_value
+FROM unnest(recallw.recall_cei) as value) AS recallcei
+,(SELECT cast(stddev(value) as decimal (10,2)) AS average_value
+FROM unnest(recallw.recall_cei) as value) AS recallceistdv
+,invw.docsis 
+,invw.velocidad
+,invw.modelo
+from public.inventario_mac_week_latest as invw
+join reports.cei_week_latest as ceiw on ceiw.mac=invw.mac
+join reports.mw_cei_week_rank as recallw on invw.mac=recallw.mac
+where
+invw.clase_servicio in ('CABLEMODEM DOCSIS 3.0','CABLEMODEM WIFI 3.0','CABLEMODEM WIFI','CABLEMODEM 3.0','CABLEMODEM','EMTA TOIP','EMTA','EMTA TOIP CORPO') and
+invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and
+invw.geo_region in ('LITORAL') and
+invw.geo_sub_region in ('LITORAL NORTE') and
+invw.geo_base_operativa in ('CORRIENTES') and
+(SELECT cast(AVG(value) as decimal (10,0)) AS average_value
+FROM unnest(recallw.recall_cei) as value) >= 60
+
+--Global Clientes B2B Agrupacion por Nodo
+
+select
+invw.geo_sub_region
+,invw.geo_base_operativa
+,count(case when invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') then ceiw.nodo else null end ) as equipos
+,ceiw.nodo
+,cast(avg(case when invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') then ceiw.cei else null end ) as decimal (10,0)) as ceib2b 
+,cast(avg(ceiw.cei) as decimal (10,0)) as cei 
+,cast(avg(recallceiw.recall_cei) as decimal (10,0)) AS recallcei
+from reports.cei_week_latest as ceiw 
+join public.inventario_mac_week_latest as invw on ceiw.mac=invw.mac
+join reports.mw_cei_week_rank as recallw on invw.mac=recallw.mac
+CROSS JOIN LATERAL (
+  SELECT AVG(value) AS recall_cei
+  FROM unnest(recallw.recall_cei) AS t(value)
+) AS recallceiw
+group by ceiw.nodo,invw.geo_sub_region,invw.geo_base_operativa
+order by equipos desc;
+
+-- Conteos donas de Grafana
+
+select 
+count(case when invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and invw.docsis in ('3.0') then invw.mac else null end ) as Tres
+,count(case when invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and invw.docsis in ('3.1') then invw.mac else null end ) as Uno
+,count(case when invw.b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and invw.docsis is null then invw.mac end ) as Niull
+from public.inventario_mac_week_latest as invw
+join reports.mw_cei_week_rank as recallw on invw.mac=recallw.mac
+where
+(SELECT cast(AVG(value) as decimal (10,0)) AS average_value
+FROM unnest(recallw.recall_cei) as value) < 60
+
+select 
+count(case when b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and docsis in ('3.0') then mac else null end ) as Tres
+,count(case when b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and docsis in ('3.1') then mac else null end ) as Uno
+,count(case when b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and docsis is null then mac end ) as Niull
+from public.inventario_mac_week_latest
+
+-- Conteo B2B 3.0 Velocidad > 300
+
+select 
+count(mac) as equipos
+from 
+public.inventario_mac_week_latest
+where
+b2b_class2 in ('Convenio', 'Empresas y Negocios', 'Gran Cliente', 'Residencial') and 
+docsis in ('3.0') and --velocidad in ('INT 500MEGAS WIFI','INT 600MEGAS WIFI','INT 1000MEGAS WIFI') then mac else null end ) as Tres
+clase_servicio in ('CABLEMODEM DOCSIS 3.0','CABLEMODEM WIFI 3.0','CABLEMODEM WIFI','CABLEMODEM 3.0','CABLEMODEM','EMTA TOIP','EMTA','EMTA TOIP CORPO') and
+velocidad_ds > 300
+
+-- Conteo de Clientes por nodo Parque total
+
+select
+invw.geo_sub_region
+,invw.geo_base_operativa
+,invw.nodo
+,equiposnodow.equipos
+,recallw.avg_cei
+,(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recallw.recall_avg_cei) as value) AS recallcei
+,(SELECT cast(stddev(value) as decimal (10,2)) AS average_value
+FROM unnest(recallw.recall_avg_cei) as value) AS recallceistdv
+from
+public.inventario_mac_week_latest as invw
+join (select 
+nodo
+,count(case when clase_servicio in ('CABLEMODEM DOCSIS 3.0','CABLEMODEM WIFI 3.0','CABLEMODEM WIFI','CABLEMODEM 3.0','CABLEMODEM','EMTA TOIP','EMTA','EMTA TOIP CORPO')
+then nodo else null end ) as equipos 
+from public.inventario_mac_week_latest
+group by nodo) as equiposnodow on equiposnodow.nodo = invw.nodo
+join reports.mw_cei_week_rank_nodo as recallw on invw.nodo=recallw.nodo
+group by 
+invw.geo_sub_region
+,invw.geo_base_operativa
+,invw.nodo
+,equiposnodow.equipos
+,recallw.avg_cei
+,recallcei
+,recallceistdv
+order by equipos desc
+limit 1000
+
+-- Nodos objetivo por base B2C
+
+select
+geo_region
+,geo_sub_region
+,geo_base_operativa
+,hub
+,cmts_name
+,nodo
+,sector_operativo
+,devices
+,avg_cei
+,(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_avg_cei[7:12]) as value where value <> 0) AS recallcei6
+,(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_avg_cei) as value where value <> 0) AS recallcei
+,(SELECT cast(stddev(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_avg_cei) as value) AS recallceistdv
+from reports.mw_cei_week
+
+-- Grafana con selector, objetivos HFC Action
+
+WITH subquery AS (
+  SELECT
+    dt_week as "Week",
+    a.geo_region as "Region", 
+    a.geo_sub_region as "Sub Region",
+    a.geo_base_operativa as "Base Operativa",
+    a.devices_detractores_total as "Clientes Detractores",
+    a.devices_detractores_total as DetractoresTotales,
+    (sum(a.devices_detractores_total) / sum(a.devices)::float)*100 as "Detractores",
+    max(org.DetractoresQ1_2023)::float*100 as "Objetivo Q2 23",
+    (max(org.DetractoresQ1_2023)::float*100) - (sum(a.devices_detractores_total)/ sum(a.devices)::float)*100  as "Desvío Q2"
+  FROM reports.cei_week_aggr_org a
+  JOIN reports.hfc_objetivos_2022 org ON 
+    lower(a.geo_region) = lower(org.region) AND
+    lower(a.geo_sub_region) = lower(org.subregion) AND
+    lower(a.geo_base_operativa) = lower(org.baseop) 
+  WHERE 
+    nodo IN ('-T-') AND
+    dt_week IN ('$WEEK') AND
+    CASE 
+      WHEN '$REGION' != '-T-' AND '$SUBREGION' = '-T-' AND '$BASEOPERATIVA' = '-T-' THEN upper(a.geo_region) IN ('$REGION') AND upper(a.geo_sub_region) NOT IN ('-T-') AND upper(a.geo_base_operativa) IN ('-T-')
+      WHEN '$REGION' != '-T-' AND '$SUBREGION' != '-T-' AND '$BASEOPERATIVA' = '-T-' THEN upper(a.geo_region) IN ('$REGION') AND upper(a.geo_sub_region) IN ('$SUBREGION') AND upper(a.geo_base_operativa) NOT IN ('-T-')
+      WHEN '$REGION' != '-T-' AND '$SUBREGION' != '-T-' AND '$BASEOPERATIVA' != '-T-' THEN upper(a.geo_region) IN ('$REGION') AND upper(a.geo_sub_region) IN ('$SUBREGION') AND upper(a.geo_base_operativa) IN ('$BASEOPERATIVA')
+      ELSE upper(a.geo_sub_region) IN ('$SUBREGION') AND upper(a.geo_base_operativa) IN ('$BASEOPERATIVA') AND upper(a.geo_region) NOT IN ('-T-')
+    END
+  GROUP BY 1,2,3,4,5
+)
+SELECT
+  main.dt_week AS "Week",
+  main.geo_region AS "Region", 
+  main.geo_sub_region AS "Sub Region",
+  main.geo_base_operativa AS "Base Operativa",
+  main.devices_detractores_total AS "Detractores Totales",
+  (main.devices_detractores_total / subquery.totaldev::float) * 100 AS "Peso a Objetivos",
+  (main.devices_detractores_total / sum(main.devices)::float) * 100 AS "Detractores",
+  max(org.DetractoresQ1_2023)::float * 100 AS "Objetivo Q2 23",
+  (max(org.DetractoresQ1_2023)::float*100) - (sum(main.devices_detractores_total)/ sum(main.devices)::float)*100  as "Desvío Q2"
+FROM reports.cei_week_aggr_org main
+JOIN reports.hfc_objetivos_2022 org ON 
+  lower(main.geo_region) = lower(org.region) AND
+  lower(main.geo_sub_region) = lower(org.subregion) AND
+  lower(main.geo_base_operativa) = lower(org.baseop) 
+CROSS JOIN (SELECT sum(DetractoresTotales) AS totaldev FROM subquery) AS subquery
+WHERE 
+  main.nodo IN ('-T-') AND
+  main.dt_week IN ('$WEEK') AND
+  CASE 
+    WHEN '$REGION' != '-T-' AND '$SUBREGION' = '-T-' AND '$BASEOPERATIVA' = '-T-' THEN upper(main.geo_region) IN ('$REGION') AND upper(main.geo_sub_region) NOT IN ('-T-') AND upper(main.geo_base_operativa) IN ('-T-')
+    WHEN '$REGION' != '-T-' AND '$SUBREGION' != '-T-' AND '$BASEOPERATIVA' = '-T-' THEN upper(main.geo_region) IN ('$REGION') AND upper(main.geo_sub_region) IN ('$SUBREGION') AND upper(main.geo_base_operativa) NOT IN ('-T-')
+    WHEN '$REGION' != '-T-' AND '$SUBREGION' != '-T-' AND '$BASEOPERATIVA' != '-T-' THEN upper(main.geo_region) IN ('$REGION') AND upper(main.geo_sub_region) IN ('$SUBREGION') AND upper(main.geo_base_operativa) IN ('$BASEOPERATIVA')
+    ELSE upper(main.geo_sub_region) IN ('$SUBREGION') AND upper(main.geo_base_operativa) IN ('$BASEOPERATIVA') AND upper(main.geo_region) NOT IN ('-T-')
+  END
+GROUP BY 1,2,3,4,5,subquery.totaldev;
+
