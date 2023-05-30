@@ -185,3 +185,36 @@ WHERE
   END
 GROUP BY 1,2,3,4,5,subquery.totaldev;
 
+--Grafana Objetivos HFC Action
+
+select
+geo_region,
+geo_sub_region,
+geo_base_operativa,
+sector_operativo,
+conf_us,
+devices_detractores,
+cast(devices * (devices_detractores/100) as decimal (10,0)) as "Clientes Detractores",
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_detractores[7:12]) as value where value <> 0) AS "% Clientes Detractores 6 Semanas",
+cast(devices * ((SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_detractores[7:12]) as value where value <> 0)/100) as decimal (10,0)) AS "Clientes Detractores 6 Semanas",
+(SELECT cast(AVG(value) as decimal (10,0)) AS average_value
+FROM unnest(recall_devices_detractores) as value where value <> 0) AS "% Clientes Detractores 12 Semanas",
+cast(devices * ((SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_detractores) as value where value <> 0)/100) as decimal (10,0)) AS "Clientes Detractores 12 Semanas",
+avg_cei,
+devices_kpi_salud as "SDR",
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_kpi_salud[7:12]) as value where value <> 0) AS "SDR 6 Semanas",
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_kpi_salud) as value where value <> 0) AS "SDR 12 Semanas",
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_avg_cei[7:12]) as value where value <> 0) AS "Avg CEI 6 Semanas",
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_avg_cei) as value where value <> 0) AS "Avg CEI 12 Semanas"
+from
+reports.mw_cei_week_rank_sector_operativo
+where cast(devices * ((SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(recall_devices_detractores[7:12]) as value where value <> 0)/100) as decimal (10,0)) is not null
+order by "Clientes Detractores 6 Semanas" desc 
