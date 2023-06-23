@@ -1,0 +1,90 @@
+DROP TABLE IF EXISTS sandbox.b2b_cei_rank;
+CREATE TABLE sandbox.b2b_cei_rank AS
+select distinct
+subfamilia,
+familia,
+tecnologia,
+propietario,
+segmento_convergente,
+subsegmento_convergente,
+ceii.dt_week,
+ceii.mac,
+ceii.id_subscripcion,
+b2b.id_producto,
+id_cliente,
+ceii.geo_region,
+ceii.geo_sub_region,
+ceii.geo_base_operativa,
+ceii.hub,
+ceii.cmts_name,
+ceii.nodo,
+ceii.sector_operativo,
+ceii.modelo,
+ceii.docsis,
+ceii.sw_version,
+apellido_cliente,
+nombre_cliente,
+ceii.direccion_calle,
+ceii.direccion_altura,
+perfil,
+consumo,
+velocidad,
+velocidad_ds,
+velocidad_us,
+cei,
+observado_saludred,
+observado_estabilidad,
+observado_preq,
+observado_partial_ds,
+observado_partial_us,
+observado_latencia,
+observado_dano_open,
+recall_dt_week,
+recall_semana,
+recall_cei,
+calls_12w,
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(ceii.recall_cei[7:12]) as value where value <> 0) AS avg_cei_6w,
+(SELECT cast(AVG(value) as decimal (10,2)) AS average_value
+FROM unnest(ceii.recall_cei) as value where value <> 0) as avg_cei_12w,
+recall_observado_saludred,
+recall_observado_estabilidad,
+recall_observado_partial_ds,
+recall_observado_partial_us,
+recall_observado_dano_open,
+cuit,
+avg_tx,
+"CLUSTER",
+"SUB-CLUSTER",
+directa,
+reversa,
+mhz,
+mhzret,
+srv_err
+from 
+sandbox.parque_b2b_hfc_202304 as b2b
+left join public.inventario_mac_week_latest as invw on invw.id_producto = b2b.id_producto
+left join reports.mw_cei_week_rank as ceii on ceii.mac = invw.mac
+left join 
+(select 
+count(distinct id_ot) as calls_12w,
+ceii.mac
+from
+sandbox.parque_b2b_hfc_202304 as b2b
+left join public.inventario_mac_week_latest as invw on invw.id_producto = b2b.id_producto
+left join reports.mw_cei_week_rank as ceii on ceii.mac = invw.mac
+left join microstrategy.cor003 as ots on b2b.id_producto::varchar = ots."ID PRODUCTO"
+where fecha_creacion_ot is not null and fecha_creacion_ot between recall_semana[1]::date and recall_semana[12]::date--recall_semana[1]::date and current_date
+group by ceii.mac) as ots on ceii.mac = ots.mac
+left join
+(select 
+avg(avg_txpower_us)::int as avg_tx, invw.mac
+from
+sandbox.parque_b2b_hfc_202304 as b2b
+left join public.inventario_mac_week_latest as invw on invw.id_producto = b2b.id_producto
+left join nxt.unmacme_cm_day as nxt on invw.mac = nxt.mac
+left join reports.mw_cei_week_rank as ceii on ceii.mac = invw.mac
+where fecha between recall_semana[11]::date and recall_semana[12]::date-->= current_date - interval '8 days'
+group by invw.mac) as nxt on ceii.mac = nxt.mac
+left join sandbox.corr_nort as cornrt on invw.sector_operativo = cornrt.zona
+left join sandbox.nat_check_last as nat on invw.mac  = upper(nat.macaddress)
